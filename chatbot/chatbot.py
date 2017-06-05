@@ -70,7 +70,7 @@ class Chatbot:
         self.MODEL_NAME_BASE = 'model'
         self.MODEL_EXT = '.ckpt'
         self.CONFIG_FILENAME = 'params.ini'
-        self.CONFIG_VERSION = '0.4'
+        self.CONFIG_VERSION = '0.5'
         self.TEST_IN_NAME = 'data/test/samples.txt'
         self.TEST_OUT_SUFFIX = '_predictions.txt'
         self.SENTENCES_PREFIX = ['Q: ', 'A: ']
@@ -113,15 +113,18 @@ class Chatbot:
         datasetArgs.add_argument('--datasetTag', type=str, default='', help='add a tag to the dataset (file where to load the vocabulary and the precomputed samples, not the original corpus). Useful to manage multiple versions. Also used to define the file used for the lightweight format.')  # The samples are computed from the corpus if it does not exist already. There are saved in \'data/samples/\'
         datasetArgs.add_argument('--ratioDataset', type=float, default=1.0, help='ratio of dataset used to avoid using the whole dataset')  # Not implemented, useless ?
         datasetArgs.add_argument('--maxLength', type=int, default=10, help='maximum length of the sentence (for input and output), define number of maximum step of the RNN')
-        datasetArgs.add_argument('--lightweightFile', type=str, default=None, help='file containing our lightweight-formatted corpus')
+        datasetArgs.add_argument('--filterVocab', type=int, default=1, help='remove rarelly used words (by default words used only once). 0 to keep all words.')
+        datasetArgs.add_argument('--skipLines', action='store_true', help='Generate training samples by only using even conversation lines as questions (and odd lines as answer). Useful to train the network on a particular person.')
+        datasetArgs.add_argument('--vocabularySize', type=int, default=40000, help='Limit the number of words in the vocabulary (0 for unlimited)')
 
         # Network options (Warning: if modifying something here, also make the change on save/loadParams() )
         nnArgs = parser.add_argument_group('Network options', 'architecture related option')
         nnArgs.add_argument('--hiddenSize', type=int, default=512, help='number of hidden units in each RNN cell')
         nnArgs.add_argument('--numLayers', type=int, default=2, help='number of rnn layers')
-        nnArgs.add_argument('--embeddingSize', type=int, default=64, help='embedding size of the word representation')
-        nnArgs.add_argument('--initEmbeddings', action='store_true', help='if present, the program will initialize the embeddings with pre-trained word2vec vectors')
         nnArgs.add_argument('--softmaxSamples', type=int, default=0, help='Number of samples in the sampled softmax loss function. A value of 0 deactivates sampled softmax')
+        nnArgs.add_argument('--initEmbeddings', action='store_true', help='if present, the program will initialize the embeddings with pre-trained word2vec vectors')
+        nnArgs.add_argument('--embeddingSize', type=int, default=64, help='embedding size of the word representation')
+        nnArgs.add_argument('--embeddingSource', type=str, default="GoogleNews-vectors-negative300.bin", help='embedding file to use for the word representation')
 
         # Training options
         trainingArgs = parser.add_argument_group('Training options')
@@ -168,7 +171,7 @@ class Chatbot:
 
         # Saver/summaries
         self.writer = tf.summary.FileWriter(self._getSummaryName())
-        self.saver = tf.train.Saver(max_to_keep=200, write_version=tf.train.SaverDef.V1)  # TODO: See GitHub for format name issue (when restoring the model)
+        self.saver = tf.train.Saver(max_to_keep=200)
 
         # TODO: Fixed seed (WARNING: If dataset shuffling, make sure to do that after saving the
         # dataset, otherwise, all which cames after the shuffling won't be replicable when
@@ -194,7 +197,6 @@ class Chatbot:
 
         # Initialize embeddings with pre-trained word2vec vectors
         if self.args.initEmbeddings:
-            print("Loading pre-trained embeddings from GoogleNews-vectors-negative300.bin")
             self.loadEmbedding(self.sess)
 
         if self.args.test:
@@ -404,7 +406,10 @@ class Chatbot:
             return
 
         # New model, we load the pre-trained word2vec data and initialize embeddings
-        with open(os.path.join(self.args.rootDir, 'data/word2vec/GoogleNews-vectors-negative300.bin'), "rb", 0) as f:
+        embeddings_path = os.path.join(self.args.rootDir, 'data', 'embeddings', self.args.embeddingSource)
+        embeddings_format = os.path.splitext(embeddings_path)[1][1:]
+        print("Loading pre-trained word embeddings from %s " % embeddings_path)
+        with open(embeddings_path, "rb") as f:
             header = f.readline()
             vocab_size, vector_size = map(int, header.split())
             binary_len = np.dtype('float32').itemsize * vector_size
@@ -419,9 +424,20 @@ class Chatbot:
                     if ch != b'\n':
                         word.append(ch)
                 if word in self.textData.word2id:
-                    initW[self.textData.word2id[word]] = np.fromstring(f.read(binary_len), dtype='float32')
+                    if embeddings_format == 'bin':
+                        vector = np.fromstring(f.read(binary_len), dtype='float32')
+                    elif embeddings_format == 'vec':
+                        vector = np.fromstring(f.readline(), sep=' ', dtype='float32')
+                    else:
+                        raise Exception("Unkown format for embeddings: %s " % embeddings_format)
+                    initW[self.textData.word2id[word]] = vector
                 else:
-                    f.read(binary_len)
+                    if embeddings_format == 'bin':
+                        f.read(binary_len)
+                    elif embeddings_format == 'vec':
+                        f.readline()
+                    else:
+                        raise Exception("Unkown format for embeddings: %s " % embeddings_format)
 
         # PCA Decomposition to reduce word2vec dimensionality
         if self.args.embeddingSize < vector_size:
@@ -484,7 +500,10 @@ class Chatbot:
         """
         tqdm.write('Checkpoint reached: saving model (don\'t stop the run)...')
         self.saveModelParams()
-        self.saver.save(sess, self._getModelName())  # TODO: Put a limit size (ex: 3GB for the modelDir)
+        model_name = self._getModelName()
+        with open(model_name, 'w') as f:  # HACK: Simulate the old model existance to avoid rewriting the file parser
+            f.write('This file is used internally by DeepQA to check the model existance. Please do not remove.\n')
+        self.saver.save(sess, model_name)  # TODO: Put a limit size (ex: 3GB for the modelDir)
         tqdm.write('Model saved.')
 
     def _getModelList(self):
@@ -519,17 +538,22 @@ class Chatbot:
 
             # Restoring the the parameters
             self.globStep = config['General'].getint('globStep')
-            self.args.maxLength = config['General'].getint('maxLength')  # We need to restore the model length because of the textData associated and the vocabulary size (TODO: Compatibility mode between different maxLength)
             self.args.watsonMode = config['General'].getboolean('watsonMode')
             self.args.autoEncode = config['General'].getboolean('autoEncode')
             self.args.corpus = config['General'].get('corpus')
-            self.args.datasetTag = config['General'].get('datasetTag', '')
+
+            self.args.datasetTag = config['Dataset'].get('datasetTag')
+            self.args.maxLength = config['Dataset'].getint('maxLength')  # We need to restore the model length because of the textData associated and the vocabulary size (TODO: Compatibility mode between different maxLength)
+            self.args.filterVocab = config['Dataset'].getint('filterVocab')
+            self.args.skipLines = config['Dataset'].getboolean('skipLines')
+            self.args.vocabularySize = config['Dataset'].getint('vocabularySize')
 
             self.args.hiddenSize = config['Network'].getint('hiddenSize')
             self.args.numLayers = config['Network'].getint('numLayers')
-            self.args.embeddingSize = config['Network'].getint('embeddingSize')
-            self.args.initEmbeddings = config['Network'].getboolean('initEmbeddings')
             self.args.softmaxSamples = config['Network'].getint('softmaxSamples')
+            self.args.initEmbeddings = config['Network'].getboolean('initEmbeddings')
+            self.args.embeddingSize = config['Network'].getint('embeddingSize')
+            self.args.embeddingSource = config['Network'].get('embeddingSource')
 
             # No restoring for training params, batch size or other non model dependent parameters
 
@@ -537,16 +561,20 @@ class Chatbot:
             print()
             print('Warning: Restoring parameters:')
             print('globStep: {}'.format(self.globStep))
-            print('maxLength: {}'.format(self.args.maxLength))
             print('watsonMode: {}'.format(self.args.watsonMode))
             print('autoEncode: {}'.format(self.args.autoEncode))
             print('corpus: {}'.format(self.args.corpus))
             print('datasetTag: {}'.format(self.args.datasetTag))
+            print('maxLength: {}'.format(self.args.maxLength))
+            print('filterVocab: {}'.format(self.args.filterVocab))
+            print('skipLines: {}'.format(self.args.skipLines))
+            print('vocabularySize: {}'.format(self.args.vocabularySize))
             print('hiddenSize: {}'.format(self.args.hiddenSize))
             print('numLayers: {}'.format(self.args.numLayers))
-            print('embeddingSize: {}'.format(self.args.embeddingSize))
-            print('initEmbeddings: {}'.format(self.args.initEmbeddings))
             print('softmaxSamples: {}'.format(self.args.softmaxSamples))
+            print('initEmbeddings: {}'.format(self.args.initEmbeddings))
+            print('embeddingSize: {}'.format(self.args.embeddingSize))
+            print('embeddingSource: {}'.format(self.args.embeddingSource))
             print()
 
         # For now, not arbitrary  independent maxLength between encoder and decoder
@@ -565,18 +593,24 @@ class Chatbot:
         config['General'] = {}
         config['General']['version']  = self.CONFIG_VERSION
         config['General']['globStep']  = str(self.globStep)
-        config['General']['maxLength'] = str(self.args.maxLength)
         config['General']['watsonMode'] = str(self.args.watsonMode)
         config['General']['autoEncode'] = str(self.args.autoEncode)
         config['General']['corpus'] = str(self.args.corpus)
-        config['General']['datasetTag'] = str(self.args.datasetTag)
+
+        config['Dataset'] = {}
+        config['Dataset']['datasetTag'] = str(self.args.datasetTag)
+        config['Dataset']['maxLength'] = str(self.args.maxLength)
+        config['Dataset']['filterVocab'] = str(self.args.filterVocab)
+        config['Dataset']['skipLines'] = str(self.args.skipLines)
+        config['Dataset']['vocabularySize'] = str(self.args.vocabularySize)
 
         config['Network'] = {}
         config['Network']['hiddenSize'] = str(self.args.hiddenSize)
         config['Network']['numLayers'] = str(self.args.numLayers)
-        config['Network']['embeddingSize'] = str(self.args.embeddingSize)
-        config['Network']['initEmbeddings'] = str(self.args.initEmbeddings)
         config['Network']['softmaxSamples'] = str(self.args.softmaxSamples)
+        config['Network']['initEmbeddings'] = str(self.args.initEmbeddings)
+        config['Network']['embeddingSize'] = str(self.args.embeddingSize)
+        config['Network']['embeddingSource'] = str(self.args.embeddingSource)
 
         # Keep track of the learning params (but without restoring them)
         config['Training (won\'t be restored)'] = {}

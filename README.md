@@ -11,6 +11,7 @@
 * [Results](#results)
 * [Pretrained model](#pretrained-model)
 * [Improvements](#improvements)
+* [Upgrade](#upgrade)
 
 ## Presentation
 
@@ -24,6 +25,8 @@ For now, DeepQA support the following dialog corpus:
  * Supreme Court Conversation Data (thanks to [julien-c](https://github.com/julien-c)). Available using `--corpus scotus`. See the [instructions](data/scotus/) for installation.
  * [Ubuntu Dialogue Corpus](https://arxiv.org/abs/1506.08909) (thanks to [julien-c](https://github.com/julien-c)). Available using `--corpus ubuntu`. See the [instructions](data/ubuntu/) for installation.
  * Your own data (thanks to [julien-c](https://github.com/julien-c)) by using a simple custom conversation format (See [here](data/lightweight) for more info).
+
+To speedup the training, it's also possible to use pre-trained word embeddings (thanks to [Eschnou](https://github.com/eschnou)). More info [here](data/embeddings).
 
 ## Installation
 
@@ -60,6 +63,7 @@ To train the model, simply run `main.py`. Once trained, you can test the results
 Here are some flags which could be useful. For more help and options, use `python main.py -h`:
  * `--modelTag <name>`: allow to give a name to the current model to differentiate between them when testing/training.
  * `--keepAll`: use this flag when training if when testing, you want to see the predictions at different steps (it can be interesting to see the program changes its name and age as the training progress). Warning: It can quickly take a lot of storage space if you don't increase the `--saveEvery` option.
+ * `--filterVocab 20` or `--vocabularySize 30000`: Limit the vocabulary size to and optimize the performances and memory usage. Replace the words used less than 20 times by the `<unknown>` token and set a maximum vocabulary size.
  * `--verbose`: when testing, will print the sentences as they are computed.
  * `--playDataset`: show some dialogue samples from the dataset (can be use conjointly with `--createDataset` if this is the only action you want to perform).
 
@@ -203,7 +207,10 @@ It also seems to overfit as sometimes it will just pop out sentences from its tr
 
 ## Pretrained model
 
-You can find a pre-trained model [here](https://drive.google.com/file/d/0Bw-phsNSkq23TXltWGlOdk9wOXc/view?usp=sharing), trained of the default corpus. To launch it, extract it inside `DeepQA/save/` and run `./main.py --modelTag pretrainedv2 --test interactive`. The old pre-trained model is still available  [here](https://drive.google.com/file/d/0Bw-phsNSkq23amlSZXVqcm5oVFU/view?usp=sharing) (Won't work with the current version).
+You can find a pre-trained model [here](https://drive.google.com/file/d/0Bw-phsNSkq23OXRFTkNqN0JGUU0/view?usp=sharing), trained of the default corpus. To use it:
+ 1. Extract the zip file inside `DeepQA/save/`
+ 2. Copy the preprocessed dataset from `save/model-pretrainedv2/dataset-cornell-old-lenght10-filter0-vocabSize0.pkl` to `data/samples/`.
+ 3. Run `./main.py --modelTag pretrainedv2 --test interactive`.
 
 If you have a high-end GPU, don't hesitate to play with the hyper-parameters/corpus to train a better model. From my experiments, it seems that the learning rate and dropout rate have the most impact on the results. Also if you want to share your models, don't hesitate to contact me and I'll add it here.
 
